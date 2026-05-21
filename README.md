@@ -54,6 +54,34 @@ Our platform powers 100M+ clicks and 2M+ links monthly, and is used by world-cla
 
 You can self-host Dub for greater control over your data and design. [Read this guide](https://dub.co/docs/self-hosting/guide) to learn more.
 
+## Qoder CI/CD Integration
+
+This project integrates the **Qoder Product Family** for AI-powered development workflow automation.
+
+### Pipeline Triggers
+
+| Trigger | Action | Qoder Product |
+| --- | --- | --- |
+| **PR opened** | Automated AI Code Review | QoderCLI |
+| **Issue labeled `qoder-autofix`** | Auto-analyze and fix, create PR | QoderCLI |
+| **Push to main** | Quality check + Docker build + Release Notes | QoderCLI |
+| **IM command** | Remote task dispatch and notifications | QoderWork |
+| **24/7 monitoring** | Production health monitoring and auto-repair | QoderWake |
+
+### Quick Start
+
+1. **Trigger AI Code Review**: Open a PR against `main` — QoderCLI will automatically review the diff and post comments.
+2. **Trigger Auto-fix**: Create an Issue and add the `qoder-autofix` label — QoderCLI will analyze, fix, and create a PR.
+3. **View Pipeline**: Check the [Actions tab](../../actions) for pipeline status.
+
+### Configuration Files
+
+- `.qoder/AGENTS.md` — QoderCLI project conventions and autonomy boundaries
+- `.github/workflows/qoder-ci-cd.yml` — GitHub Actions CI/CD pipeline
+- `deploy/Dockerfile` — Multi-stage Docker build for Alibaba Cloud ECS
+- `deploy/docker-compose.yml` — Production deployment with Nginx + SSL
+
+
 ## Contributing
 
 We love our contributors! Here's how you can contribute:
