@@ -1,25 +1,29 @@
 # ═══════════════════════════════════════════════════════════════
 # 云效 Flow 流水线 1/3 — 主线构建部署
 #
-# 触发条件: Push to main
-# 功能: 质量检查 → Docker 构建推送 ACR → 部署 ECS → Release Notes → 钉钉通知
+# 触发条件: Push to main (Codeup 代码源触发)
+# 功能: 代码质量检查 → Docker 构建推送 ACR → ECS 部署(Staging/Production)
+#       → QoderCLI Release Notes → 钉钉群通知
 #
-# 安全说明:
-#   QODER_API_KEY 存储在云效 Flow 变量管理中（加密）
-#   运行环境为阿里云内网，Key 不经过公网/GitHub
+# 安全架构:
+#   - 代码托管: 云效 Codeup (阿里云内网)
+#   - 密钥管理: 云效变量管理 (加密存储)
+#   - 执行环境: China Aliyun Linux 3 (阿里云构建集群)
+#   - 全链路不经过任何公网第三方平台
 #
 # 使用方式:
 #   1. 云效 Flow → 新建流水线 → YAML 模式
 #   2. 粘贴本文件内容
-#   3. 配置代码源（GitHub rickmodel/dub-demo 或 Codeup 镜像仓库）
-#   4. 在「变量管理」中配置所需变量（见下方 envs 注释）
+#   3. 关联 Codeup 代码库 → 选择 main 分支
+#   4. 开启代码源触发: Push 事件, 分支过滤 main
+#   5. 在「变量管理」中配置所需加密变量
 # ═══════════════════════════════════════════════════════════════
 
 sources:
   dub_repo:
-    type: github                          # 或 codeup（如已导入到 Codeup）
+    type: codeup
     name: dub-demo
-    endpoint: https://github.com/rickmodel/dub-demo
+    endpoint: https://codeup.aliyun.com/${ORG_ID}/dub/dub-demo
     branch: main
     trigger:
       push:
@@ -35,7 +39,7 @@ stages:
       quality_job:
         name: "Lint + Format + Test"
         runsOn:
-          group: China Aliyun Linux 3     # 云效公共构建集群
+          group: China Aliyun Linux 3
         steps:
           checkout_step:
             step: Checkout
@@ -43,7 +47,7 @@ stages:
 
           node_setup:
             step: NpmBuild
-            name: "安装 Node.js + pnpm + 依赖"
+            name: "安装 Node.js 20 + pnpm 9 + 依赖"
             with:
               nodeVersion: "20"
               run: |
@@ -55,7 +59,7 @@ stages:
             name: "Prettier 格式检查"
             with:
               run: pnpm run prettier-check
-            continueOnError: true          # 遗留代码兼容
+            continueOnError: true
 
           lint_check:
             step: Command
@@ -86,23 +90,22 @@ stages:
                 SHORT_SHA=$(echo ${CI_COMMIT_SHA} | head -c 7)
                 IMAGE_TAG="${CI_PIPELINE_NUMBER}-${SHORT_SHA}"
                 echo "IMAGE_TAG=${IMAGE_TAG}" >> ${PIPELINE_ENV}
-                echo "镜像标签: ${IMAGE_TAG}"
+                echo "📦 镜像标签: ${IMAGE_TAG}"
 
           build_push_step:
             step: ACRDockerBuild
-            name: "构建并推送到 ACR"
+            name: "构建并推送到阿里云 ACR"
             with:
               region: "${ACR_REGION}"
               dockerfilePath: deploy/Dockerfile
               contextPath: .
-              repository: "${ACR_NAMESPACE}/${IMAGE_NAME}"
+              repository: "${ACR_NAMESPACE}/dub"
               tag: "${IMAGE_TAG}"
               buildArgs:
                 - "NEXT_PUBLIC_APP_URL=${APP_URL}"
         envs:
           ACR_REGION: cn-hangzhou
-          ACR_NAMESPACE: "${ACR_NAMESPACE}"    # 云效变量管理配置
-          IMAGE_NAME: dub
+          ACR_NAMESPACE: "${ACR_NAMESPACE}"
           APP_URL: "${APP_URL}"
 
   # ─── 阶段 3: 部署 Staging ────────────────────────────────
@@ -110,7 +113,7 @@ stages:
     name: "部署 Staging"
     jobs:
       staging_job:
-        name: "Staging ECS 部署"
+        name: "Staging ECS 部署 + 冒烟测试"
         needs: [docker_job]
         runsOn:
           group: China Aliyun Linux 3
@@ -120,21 +123,13 @@ stages:
             name: "ECS 拉取镜像并重启"
             with:
               regionId: cn-hangzhou
-              instanceId: "${STAGING_ECS_ID}"  # 云效变量管理配置
+              instanceId: "${STAGING_ECS_ID}"
               command: |
                 cd /opt/dub
-
-                # 登录 ACR
                 docker login registry.cn-hangzhou.aliyuncs.com \
                   -u ${ACR_USERNAME} -p ${ACR_PASSWORD}
-
-                # 拉取最新镜像
                 docker pull registry.cn-hangzhou.aliyuncs.com/${ACR_NAMESPACE}/dub:latest
-
-                # 更新服务
                 docker-compose up -d --remove-orphans
-
-                # 健康检查
                 sleep 15
                 curl -sf http://localhost:3000/api/health && echo "✅ Staging 部署成功" || exit 1
 
@@ -143,7 +138,6 @@ stages:
             name: "Staging 冒烟测试"
             with:
               run: |
-                STAGING_URL="${STAGING_URL}"
                 curl -sf "${STAGING_URL}/api/health" || exit 1
                 echo "✅ 冒烟测试通过"
 
@@ -157,10 +151,10 @@ stages:
         with:
           message: "Staging 测试通过，是否发布到生产环境？"
           approvers:
-            - "${APPROVER_USER}"           # 云效变量管理配置
+            - "${APPROVER_USER}"
 
       production_job:
-        name: "Production ECS 部署"
+        name: "Production ECS 滚动部署"
         needs: [approval_job]
         runsOn:
           group: China Aliyun Linux 3
@@ -178,12 +172,10 @@ stages:
                 docker tag registry.cn-hangzhou.aliyuncs.com/${ACR_NAMESPACE}/dub:current \
                   registry.cn-hangzhou.aliyuncs.com/${ACR_NAMESPACE}/dub:rollback 2>/dev/null || true
 
-                # 登录并拉取新版本
+                # 拉取新版本
                 docker login registry.cn-hangzhou.aliyuncs.com \
                   -u ${ACR_USERNAME} -p ${ACR_PASSWORD}
                 docker pull registry.cn-hangzhou.aliyuncs.com/${ACR_NAMESPACE}/dub:latest
-
-                # 部署
                 docker-compose up -d --remove-orphans
 
                 # 健康检查 (60s 超时)
@@ -194,10 +186,10 @@ stages:
                     echo "✅ Production 部署成功"
                     exit 0
                   fi
-                  echo "等待服务启动... ($i/30)"
                   sleep 2
                 done
 
+                # 回滚
                 echo "❌ 部署失败，执行回滚"
                 docker-compose down
                 docker tag registry.cn-hangzhou.aliyuncs.com/${ACR_NAMESPACE}/dub:rollback \
@@ -209,39 +201,32 @@ stages:
   notify_stage:
     name: "发布通知"
     jobs:
-      release_notes_job:
-        name: "QoderCLI 生成 Release Notes + 钉钉通知"
+      release_job:
+        name: "QoderCLI Release Notes + 钉钉通知"
         needs: [production_job]
         runsOn:
           group: China Aliyun Linux 3
         steps:
           checkout_step:
             step: Checkout
-            name: "拉取代码"
+            name: "拉取代码（含完整历史）"
             with:
               fetchDepth: 0
 
-          qodercli_install:
+          qodercli_step:
             step: Command
-            name: "安装 QoderCLI"
+            name: "安装 QoderCLI + 生成 Release Notes"
             with:
               run: |
-                # 安装 Node.js (如不在构建镜像中)
+                # 安装 Node.js
                 curl -fsSL https://fnm.vercel.app/install | bash
                 eval "$(fnm env)"
                 fnm install 20 && fnm use 20
 
                 # 安装 QoderCLI
                 npm install -g @anthropic-ai/qoder-cli
-                qoder --version
-            envs:
-              QODER_API_KEY: "${QODER_API_KEY}"   # 云效变量管理（加密）
 
-          release_notes_step:
-            step: Command
-            name: "生成 Release Notes"
-            with:
-              run: |
+                # 生成 Release Notes
                 qoder --headless \
                   --message "基于最近合入 main 分支的 git log 生成中文 Release Notes。
                     格式:
@@ -252,27 +237,29 @@ stages:
                     - ...
                     ### 其他改进
                     - ...
-                    
                     输出到 RELEASE_NOTES.md" \
                   --allowedTools "Bash,Read,Write"
+
+                # 输出到日志
+                cat RELEASE_NOTES.md 2>/dev/null || echo "Release Notes 未生成"
               timeout: 300
             envs:
               QODER_API_KEY: "${QODER_API_KEY}"
 
           dingtalk_step:
             step: DingTalkNotice
-            name: "钉钉群通知"
+            name: "钉钉群发布通知"
             with:
               webhook: "${DINGTALK_WEBHOOK}"
               msgtype: markdown
               title: "Dub v${CI_PIPELINE_NUMBER} 已发布"
               text: |
-                ## Dub v${CI_PIPELINE_NUMBER} 已发布
+                ## 🚀 Dub v${CI_PIPELINE_NUMBER} 已发布
 
                 **部署时间**: ${CI_PIPELINE_CREATED_AT}
                 **提交**: ${CI_COMMIT_SHORT_SHA}
+                **提交者**: ${CI_COMMIT_AUTHOR}
                 **触发人**: ${CI_PIPELINE_USER}
-                **环境**: Production
 
                 ---
-                详细 Release Notes 请查看流水线产物。
+                *由 QoderCLI + 云效 Flow 自动化发布*

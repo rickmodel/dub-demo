@@ -1,6 +1,8 @@
 # AGENTS.md — Dub Demo 项目 QoderCLI 工作手册
 # 适用于 Qoder Desktop IDE 和 QoderCLI
-# 仓库: github.com/rickmodel/dub-demo
+# 代码托管: 云效 Codeup
+# CI/CD: 云效 Flow
+# 项目管理: 云效 Projex
 
 # 项目概述
 
@@ -18,6 +20,15 @@ Dub 是一个开源链接管理平台（短链服务），基于 Next.js 14 + Ty
 - **包管理**: pnpm 9+
 - **构建**: Turborepo
 
+## 研发平台
+
+- **代码托管**: 云效 Codeup
+- **CI/CD**: 云效 Flow
+- **项目管理**: 云效 Projex（工作项、迭代、看板）
+- **制品管理**: 阿里云 ACR（容器镜像）
+- **部署**: 阿里云 ECS + Docker Compose
+- **通知**: 钉钉群机器人
+
 ## 目录结构
 
 ```
@@ -33,9 +44,10 @@ dub-demo/
 │   ├── utils/             # 工具函数库
 │   ├── cli/               # Dub CLI
 │   └── tailwind-config/   # Tailwind 共享配置
-├── .github/workflows/     # GitHub Actions CI/CD
+├── yunxiao/               # 云效 Flow 流水线配置 (3条)
 ├── .qoder/                # QoderCLI 配置 (本文件)
-└── deploy/                # Docker 部署配置
+├── deploy/                # Docker 部署配置
+└── docs/                  # 项目文档
 ```
 
 # 编码规范
@@ -64,6 +76,15 @@ type: feat / fix / docs / style / refactor / test / chore
 scope: web / ui / utils / prisma / ci / docker
 ```
 
+## 分支规范
+```
+feat/projex-{工作项ID}     # 需求开发
+fix/projex-{工作项ID}      # 缺陷修复
+chore/projex-{工作项ID}    # 杂项
+```
+
+MR 标题格式: `type: 描述 (Projex#{工作项ID})`
+
 # 自治边界
 
 ## ✅ 可自主执行（无需人工确认）
@@ -85,7 +106,7 @@ scope: web / ui / utils / prisma / ci / docker
 ## 🚫 禁止执行
 - 直接修改生产数据库
 - 提交密钥/密码/Token
-- 修改 CI/CD 管线配置
+- 修改 CI/CD 管线配置（云效 Flow YAML）
 - 降低测试覆盖率
 
 # 常用命令
@@ -99,3 +120,16 @@ pnpm run format           # Prettier 格式化
 pnpm run prettier-check   # Prettier 检查
 pnpm test                 # Vitest 单元测试
 ```
+
+# 云效 Flow 流水线
+
+本项目在云效 Flow 中配置 3 条流水线:
+
+| 流水线 | 配置文件 | 触发条件 |
+|--------|---------|---------|
+| 主线构建部署 | `yunxiao/flow-main-pipeline.yml` | Push to main |
+| MR AI Code Review | `yunxiao/flow-mr-review.yml` | MR 新建/更新 |
+| 工作项自动修复 | `yunxiao/flow-issue-fix.yml` | Projex Webhook / 手动 |
+
+所有 QoderCLI 操作在云效 Flow 构建集群（China Aliyun Linux 3）内执行，
+QODER_API_KEY 存储在云效变量管理（加密），不经过任何公网第三方平台。

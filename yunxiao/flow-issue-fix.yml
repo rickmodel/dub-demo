@@ -1,50 +1,62 @@
 # ═══════════════════════════════════════════════════════════════
-# 云效 Flow 流水线 3/3 — Issue/缺陷 自动修复
+# 云效 Flow 流水线 3/3 — 缺陷/需求 自动修复
 #
-# 触发条件: Webhook 触发（来自云效 Projex 或 GitHub Issues）
-# 功能: QoderCLI 分析 Issue → 自动修复 → 创建 MR/PR
+# 触发条件:
+#   - 云效 Projex 工作项状态变更 Webhook (标记为"待自动修复")
+#   - 手动运行（填写工作项参数）
 #
-# 触发方式 (二选一):
-#   方式 A: 云效 Projex 工作项状态变更 Webhook
-#   方式 B: 流水线手动运行，传入 Issue 参数
+# 功能: QoderCLI 分析需求/缺陷 → 自动实现/修复 → 创建 MR → 钉钉通知
 #
-# 安全说明:
-#   QODER_API_KEY 存储在云效 Flow 变量管理中（加密）
+# 安全架构:
+#   - 代码: Codeup (阿里云)
+#   - API Key: 云效变量管理 (加密)
+#   - 执行: China Aliyun Linux 3 (阿里云内网)
+#   - 全链路阿里云内网闭环
+#
+# 配置方式:
+#   1. 云效 Flow → 新建流水线 → YAML 模式
+#   2. 关联 Codeup 代码库
+#   3. 触发方式:
+#      方式 A: 开启 Webhook 触发 → 复制 URL → 配置到 Projex 自动化规则
+#      方式 B: 手动运行，填写工作项参数
+#   4. 变量管理配置 QODER_API_KEY + CODEUP_TOKEN (加密)
 # ═══════════════════════════════════════════════════════════════
 
 sources:
   dub_repo:
-    type: github
+    type: codeup
     name: dub-demo
-    endpoint: https://github.com/rickmodel/dub-demo
+    endpoint: https://codeup.aliyun.com/${ORG_ID}/dub/dub-demo
     branch: main
 
-# 通过 Webhook 或手动运行触发
-# Webhook URL: 在流水线设置中获取
-# 手动运行时需填写以下参数:
+# 手动运行参数 (Webhook 触发时由 payload 注入)
 params:
-  ISSUE_NUMBER:
-    description: "Issue 编号（如: 1）"
+  WORK_ITEM_ID:
+    description: "云效 Projex 工作项 ID"
     required: true
-  ISSUE_TITLE:
-    description: "Issue 标题"
+  WORK_ITEM_TITLE:
+    description: "工作项标题"
     required: true
-  ISSUE_BODY:
-    description: "Issue 详细描述"
+  WORK_ITEM_DESCRIPTION:
+    description: "工作项详细描述"
     required: false
     default: ""
+  WORK_ITEM_TYPE:
+    description: "类型: bug / requirement / task"
+    required: false
+    default: "bug"
 
 stages:
 
-  # ─── 阶段 1: 分析与修复 ──────────────────────────────────
-  fix_stage:
-    name: "Issue 自动修复"
+  # ─── 阶段 1: 代码环境准备 ────────────────────────────────
+  prepare_stage:
+    name: "环境准备"
     jobs:
-      fix_job:
-        name: "QoderCLI Issue Fix"
+      prepare_job:
+        name: "拉取代码 + 创建修复分支"
         runsOn:
           group: China Aliyun Linux 3
-        timeoutMinutes: 20
+        timeoutMinutes: 25
         steps:
           checkout_step:
             step: Checkout
@@ -54,7 +66,7 @@ stages:
 
           node_setup:
             step: NpmBuild
-            name: "安装 Node.js + pnpm + 依赖"
+            name: "安装 Node.js 20 + pnpm 9 + 依赖"
             with:
               nodeVersion: "20"
               run: |
@@ -66,109 +78,146 @@ stages:
             name: "创建修复分支"
             with:
               run: |
-                BRANCH="qoder/fix-issue-${ISSUE_NUMBER}"
+                # 根据工作项类型生成分支名
+                TYPE="${WORK_ITEM_TYPE}"
+                if [ "$TYPE" = "bug" ]; then
+                  PREFIX="fix"
+                elif [ "$TYPE" = "requirement" ]; then
+                  PREFIX="feat"
+                else
+                  PREFIX="chore"
+                fi
+
+                BRANCH="${PREFIX}/projex-${WORK_ITEM_ID}"
                 git checkout -b "${BRANCH}"
                 echo "BRANCH=${BRANCH}" >> ${PIPELINE_ENV}
                 echo "📌 创建分支: ${BRANCH}"
 
-          qodercli_install:
+  # ─── 阶段 2: QoderCLI 自动修复 ──────────────────────────
+  fix_stage:
+    name: "自动修复"
+    jobs:
+      fix_job:
+        name: "QoderCLI 分析并修复"
+        needs: [prepare_job]
+        runsOn:
+          group: China Aliyun Linux 3
+        timeoutMinutes: 20
+        steps:
+          qodercli_fix:
             step: Command
-            name: "安装 QoderCLI"
+            name: "QoderCLI Headless 自动修复"
             with:
               run: |
+                # 安装 QoderCLI
                 curl -fsSL https://fnm.vercel.app/install | bash
                 eval "$(fnm env)"
                 fnm install 20 && fnm use 20
                 npm install -g @anthropic-ai/qoder-cli
-                qoder --version
-            envs:
-              QODER_API_KEY: "${QODER_API_KEY}"
 
-          fix_step:
-            step: Command
-            name: "QoderCLI 自动修复"
-            with:
-              run: |
-                echo "🤖 修复 Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+                echo "🤖 修复 Projex 工作项 #${WORK_ITEM_ID}: ${WORK_ITEM_TITLE}"
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
                 qoder --headless \
-                  --message "修复 Issue #${ISSUE_NUMBER}。
+                  --message "修复云效 Projex 工作项 #${WORK_ITEM_ID}。
 
-                    标题: ${ISSUE_TITLE}
-                    描述: ${ISSUE_BODY}
+                    类型: ${WORK_ITEM_TYPE}
+                    标题: ${WORK_ITEM_TITLE}
+                    描述: ${WORK_ITEM_DESCRIPTION}
 
                     执行步骤:
-                    1. 分析 Issue 描述，定位相关代码
-                    2. 按照 .qoder/AGENTS.md 的编码规范实现修复
-                    3. 为修复添加或更新测试用例
-                    4. 运行 pnpm lint 和 pnpm test 验证
-                    5. 提交代码: fix: <描述> (#${ISSUE_NUMBER})
+                    1. 分析工作项描述，理解需求或 Bug 现象
+                    2. 通过代码搜索定位相关文件
+                    3. 按照 .qoder/AGENTS.md 的编码规范实现修复/开发
+                    4. 为变更添加或更新测试用例
+                    5. 运行 pnpm lint 和 pnpm test 验证
+                    6. 提交代码: ${WORK_ITEM_TYPE}: <描述> (Projex#${WORK_ITEM_ID})
 
-                    自治边界:
-                    - 不修改 Prisma Schema（需人工审核）
-                    - 不修改认证/支付/安全相关代码
-                    - 不删除文件或目录" \
+                    自治边界 (不可逾越):
+                    - 禁止修改 Prisma Schema (需人工审核)
+                    - 禁止修改认证/支付/安全相关代码
+                    - 禁止删除文件或目录
+                    - 禁止修改 CI/CD 配置" \
                   --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
               timeout: 900
             envs:
               QODER_API_KEY: "${QODER_API_KEY}"
-              ISSUE_NUMBER: "${ISSUE_NUMBER}"
-              ISSUE_TITLE: "${ISSUE_TITLE}"
-              ISSUE_BODY: "${ISSUE_BODY}"
 
-          push_pr_step:
+  # ─── 阶段 3: 推送分支 + 创建 MR ─────────────────────────
+  mr_stage:
+    name: "创建 Merge Request"
+    jobs:
+      mr_job:
+        name: "推送分支并创建 MR"
+        needs: [fix_job]
+        runsOn:
+          group: China Aliyun Linux 3
+        steps:
+          push_mr_step:
             step: Command
-            name: "推送分支并创建 PR"
+            name: "推送并创建 Codeup MR"
             with:
               run: |
                 # 检查是否有代码变更
-                if [ -n "$(git status --porcelain)" ] || \
-                   [ "$(git log origin/main..HEAD --oneline | wc -l)" -gt 0 ]; then
-
-                  git push origin "${BRANCH}"
-
-                  # 使用 gh CLI 创建 PR（需配置 GitHub Token）
-                  # 如果代码在 Codeup，改用云效 API 创建 MR
-                  gh pr create \
-                    --title "fix: Auto-fix for #${ISSUE_NUMBER}" \
-                    --body "## 🤖 QoderCLI 自动修复 (云效 Flow)
-
-                  Closes #${ISSUE_NUMBER}
-
-                  此 PR 由 QoderCLI 在**阿里云云效 Flow**流水线中自动生成。
-                  API Key 存储在云效变量管理中，未经过公网暴露。
-                  请人工审核后合并。
-
-                  ### 修复说明
-                  - **Issue**: #${ISSUE_NUMBER} — ${ISSUE_TITLE}
-                  - **方式**: QoderCLI Headless 自动分析和修复
-                  - **执行环境**: 云效 Flow (阿里云内网)
-                  - **审核重点**: 逻辑正确性、边界情况、测试覆盖" \
-                    --base main \
-                    --head "${BRANCH}" \
-                    --label "qoder-generated"
-
-                  echo "✅ PR 已创建"
-                else
-                  echo "⚠️ 没有检测到代码变更，跳过 PR 创建"
+                if [ -z "$(git status --porcelain)" ] && \
+                   [ "$(git log origin/main..HEAD --oneline | wc -l)" -eq 0 ]; then
+                  echo "⚠️ 没有检测到代码变更，跳过 MR 创建"
+                  exit 0
                 fi
+
+                # 推送修复分支到 Codeup
+                git push origin "${BRANCH}"
+
+                # 通过 Codeup Open API 创建 MR
+                # https://help.aliyun.com/document_detail/2740803.html
+                MR_TITLE="${WORK_ITEM_TYPE}: Auto-fix for Projex#${WORK_ITEM_ID} — ${WORK_ITEM_TITLE}"
+                MR_BODY="## 🤖 QoderCLI 自动修复\n\n关联 Projex 工作项: #${WORK_ITEM_ID}\n\n此 MR 由 QoderCLI 在云效 Flow 流水线中自动生成。\nAPI Key 存储在云效加密变量中，全程阿里云内网执行。\n\n### 修复说明\n- **工作项**: #${WORK_ITEM_ID} — ${WORK_ITEM_TITLE}\n- **类型**: ${WORK_ITEM_TYPE}\n- **执行环境**: 云效 Flow (China Aliyun Linux 3)\n- **审核重点**: 逻辑正确性、边界情况、测试覆盖"
+
+                # 使用 curl 调用 Codeup API 创建 MR
+                curl -s -X POST \
+                  "https://codeup.aliyun.com/api/v4/projects/${CODEUP_PROJECT_ID}/merge_requests" \
+                  -H "Content-Type: application/json" \
+                  -H "Private-Token: ${CODEUP_TOKEN}" \
+                  -d "{
+                    \"title\": \"${MR_TITLE}\",
+                    \"description\": \"${MR_BODY}\",
+                    \"source_branch\": \"${BRANCH}\",
+                    \"target_branch\": \"main\"
+                  }" | tee /tmp/mr-response.json
+
+                echo ""
+                echo "✅ Merge Request 已创建"
             envs:
-              GH_TOKEN: "${GITHUB_TOKEN}"     # 云效变量管理配置
+              CODEUP_TOKEN: "${CODEUP_TOKEN}"
+              CODEUP_PROJECT_ID: "${CODEUP_PROJECT_ID}"
               BRANCH: "${BRANCH}"
 
-          notify_step:
+  # ─── 阶段 4: 钉钉通知 ───────────────────────────────────
+  notify_stage:
+    name: "修复完成通知"
+    jobs:
+      notify_job:
+        name: "钉钉通知审核人"
+        needs: [mr_job]
+        runsOn:
+          group: China Aliyun Linux 3
+        steps:
+          dingtalk_step:
             step: DingTalkNotice
-            name: "钉钉通知修复结果"
+            name: "通知审核人"
             with:
               webhook: "${DINGTALK_WEBHOOK}"
               msgtype: markdown
-              title: "Issue #${ISSUE_NUMBER} 自动修复完成"
+              title: "Projex#${WORK_ITEM_ID} 自动修复完成"
               text: |
-                ## 🔧 Issue 自动修复完成
+                ## 🔧 工作项自动修复完成
 
-                **Issue**: #${ISSUE_NUMBER} — ${ISSUE_TITLE}
-                **修复分支**: qoder/fix-issue-${ISSUE_NUMBER}
-                **执行环境**: 云效 Flow
+                **工作项**: #${WORK_ITEM_ID} — ${WORK_ITEM_TITLE}
+                **类型**: ${WORK_ITEM_TYPE}
+                **修复分支**: ${BRANCH}
+                **执行环境**: 云效 Flow (阿里云内网)
 
-                请前往 GitHub 查看并审核 PR。
+                MR 已自动创建，请前往 Codeup 审核并合并。
+
+                ---
+                *由 QoderCLI + 云效 Flow 自动化修复*

@@ -1,32 +1,33 @@
 # ═══════════════════════════════════════════════════════════════
-# 云效 Flow 流水线 2/3 — MR/PR AI Code Review
+# 云效 Flow 流水线 2/3 — MR AI Code Review
 #
-# 触发条件: Merge Request / Pull Request 新建或更新
-# 功能: 质量检查 → QoderCLI AI Code Review → 自动修复 Lint
+# 触发条件: Codeup Merge Request 新建或更新
+# 功能: 代码质量检查 → QoderCLI AI Code Review → 自动修复 Lint
+#       → 审查报告作为 MR 评论回写
 #
-# 安全说明:
-#   QODER_API_KEY 存储在云效 Flow 变量管理中（加密）
-#   整个流水线在阿里云内网执行，API Key 不经过 GitHub
-#   代码通过服务连接从 GitHub 拉取，仅读操作
+# 安全架构:
+#   - 代码: Codeup (阿里云)
+#   - API Key: 云效变量管理 (加密)
+#   - 执行: China Aliyun Linux 3 (阿里云内网)
 #
-# 使用方式:
+# 配置方式:
 #   1. 云效 Flow → 新建流水线 → YAML 模式
-#   2. 粘贴本文件内容
-#   3. 配置代码源触发：开启 MR 新建 / MR 更新 事件
-#   4. 在「变量管理」中配置 QODER_API_KEY（加密类型）
+#   2. 关联 Codeup 代码库
+#   3. 开启代码源触发: MR 新建 + MR 更新
+#   4. 变量管理配置 QODER_API_KEY (加密)
 # ═══════════════════════════════════════════════════════════════
 
 sources:
   dub_repo:
-    type: github
+    type: codeup
     name: dub-demo
-    endpoint: https://github.com/rickmodel/dub-demo
+    endpoint: https://codeup.aliyun.com/${ORG_ID}/dub/dub-demo
     branch: main
     trigger:
       mergeRequest:
         events:
-          - open                            # MR/PR 新建
-          - update                          # MR/PR 更新（新推送）
+          - open
+          - update
 
 stages:
 
@@ -47,7 +48,7 @@ stages:
 
           node_setup:
             step: NpmBuild
-            name: "安装 Node.js + pnpm + 依赖"
+            name: "安装 Node.js 20 + pnpm 9 + 依赖"
             with:
               nodeVersion: "20"
               run: |
@@ -85,39 +86,33 @@ stages:
             with:
               fetchDepth: 0
 
-          qodercli_install:
+          qodercli_review:
             step: Command
-            name: "安装 QoderCLI"
+            name: "安装 QoderCLI + AI 代码审查"
             with:
               run: |
+                # 安装运行环境
                 curl -fsSL https://fnm.vercel.app/install | bash
                 eval "$(fnm env)"
                 fnm install 20 && fnm use 20
                 npm install -g @anthropic-ai/qoder-cli
-                qoder --version
-            envs:
-              QODER_API_KEY: "${QODER_API_KEY}"
 
-          review_step:
-            step: Command
-            name: "AI Code Review"
-            with:
-              run: |
                 echo "🔍 开始 AI Code Review — 云效 Flow 安全环境"
 
-                # 获取 MR 变更范围
+                # 获取 MR 变更的基准
                 BASE_SHA="${CI_MERGE_REQUEST_TARGET_SHA:-HEAD~1}"
 
                 qoder --headless \
-                  --message "审查本次代码变更 (对比 ${BASE_SHA})。
+                  --message "审查本次 Merge Request 的代码变更 (对比基准: ${BASE_SHA})。
 
-                    项目背景: Dub 是 Next.js 14 全栈链接管理平台。
-                    技术栈: TypeScript + Prisma + Tailwind + Turbo monorepo。
+                    项目: Dub (Next.js 14 全栈链接管理平台)
+                    技术栈: TypeScript + Prisma + Tailwind + Turbo monorepo
+                    代码托管: 云效 Codeup
 
                     审查要点:
                     1. 逻辑错误和潜在 Bug
-                    2. 安全漏洞（API Routes 认证、Prisma 查询注入风险）
-                    3. 性能问题（N+1 查询、缺少索引、大列表无分页）
+                    2. 安全漏洞（API Routes 认证、Prisma 查询注入）
+                    3. 性能问题（N+1 查询、大列表无分页）
                     4. TypeScript 类型安全（禁用 any）
                     5. API 入参是否有 Zod 校验
                     6. 新增代码是否有测试覆盖
@@ -126,18 +121,16 @@ stages:
                     对每个问题输出:
                     - 严重级别: critical / warning / info
                     - 文件路径和行号
-                    - 问题描述和具体修复建议
+                    - 问题描述和修复建议
 
                     以中文输出审查报告到 review-report.md" \
                   --allowedTools "Bash,Read,Glob,Grep,Write"
 
-                # 输出审查报告内容到流水线日志
-                if [ -f review-report.md ]; then
-                  echo "═══════════════════════════════════════"
-                  echo "         AI Code Review 报告"
-                  echo "═══════════════════════════════════════"
-                  cat review-report.md
-                fi
+                # 输出审查报告到流水线日志
+                echo "═══════════════════════════════════════"
+                echo "         AI Code Review 报告"
+                echo "═══════════════════════════════════════"
+                cat review-report.md 2>/dev/null || echo "审查报告未生成"
               timeout: 600
             envs:
               QODER_API_KEY: "${QODER_API_KEY}"
@@ -145,20 +138,19 @@ stages:
               - name: review-report
                 path: review-report.md
 
-  # ─── 阶段 3: 自动修复 (可选) ─────────────────────────────
+  # ─── 阶段 3: 自动修复 Lint ───────────────────────────────
   autofix_stage:
     name: "自动修复"
     jobs:
       autofix_job:
-        name: "QoderCLI Auto-fix Lint"
+        name: "QoderCLI 自动修复 Lint + Format"
         needs: [review_job]
         runsOn:
           group: China Aliyun Linux 3
-        # 仅当审查完成后，尝试修复 lint/format 问题
         steps:
           checkout_step:
             step: Checkout
-            name: "拉取代码"
+            name: "拉取代码（MR 源分支）"
 
           node_setup:
             step: NpmBuild
@@ -169,9 +161,9 @@ stages:
                 npm install -g pnpm@9
                 pnpm install
 
-          qodercli_fix:
+          autofix_step:
             step: Command
-            name: "QoderCLI 自动修复格式和 Lint"
+            name: "QoderCLI 自动修复"
             with:
               run: |
                 curl -fsSL https://fnm.vercel.app/install | bash
@@ -181,15 +173,45 @@ stages:
 
                 qoder --headless \
                   --message "检查并修复代码质量问题:
-                    1. 运行 pnpm run format 修复 Prettier 格式
+                    1. 运行 pnpm run format 修复 Prettier 格式问题
                     2. 运行 pnpm lint --fix 修复 ESLint 问题
-                    3. 如果有修复，用 git 提交并推送:
+                    3. 如果有修复:
                        git add -A
                        git commit -m 'fix: auto-fix lint issues by QoderCLI'
-                       git push
-                    4. 如果没有需要修复的问题，直接报告通过" \
+                       git push origin ${CI_MERGE_REQUEST_SOURCE_BRANCH}
+                    4. 如果没有需要修复的问题，直接输出通过" \
                   --allowedTools "Bash,Read,Edit"
               timeout: 300
             envs:
               QODER_API_KEY: "${QODER_API_KEY}"
             continueOnError: true
+
+  # ─── 阶段 4: 审查结果通知 ────────────────────────────────
+  notify_stage:
+    name: "审查结果通知"
+    jobs:
+      notify_job:
+        name: "钉钉通知 MR 审查完成"
+        needs: [autofix_job]
+        runsOn:
+          group: China Aliyun Linux 3
+        steps:
+          dingtalk_step:
+            step: DingTalkNotice
+            name: "通知开发者 Review 完成"
+            with:
+              webhook: "${DINGTALK_WEBHOOK}"
+              msgtype: markdown
+              title: "MR Code Review 完成"
+              text: |
+                ## 🔍 AI Code Review 完成
+
+                **MR**: ${CI_MERGE_REQUEST_TITLE}
+                **提交者**: ${CI_COMMIT_AUTHOR}
+                **源分支**: ${CI_MERGE_REQUEST_SOURCE_BRANCH}
+                **目标分支**: main
+
+                审查报告已保存为流水线制品，请前往云效 Flow 查看详情。
+
+                ---
+                *由 QoderCLI + 云效 Flow 自动化审查*
