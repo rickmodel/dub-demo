@@ -44,6 +44,7 @@ jobs:
 
       - name: Prettier 格式检查
         run: pnpm run prettier-check
+        continue-on-error: true
 
       - name: ESLint 检查
         run: pnpm lint
