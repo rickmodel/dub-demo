@@ -1,0 +1,174 @@
+# ═══════════════════════════════════════════════════════════════
+# 云效 Flow 流水线 3/3 — Issue/缺陷 自动修复
+#
+# 触发条件: Webhook 触发（来自云效 Projex 或 GitHub Issues）
+# 功能: QoderCLI 分析 Issue → 自动修复 → 创建 MR/PR
+#
+# 触发方式 (二选一):
+#   方式 A: 云效 Projex 工作项状态变更 Webhook
+#   方式 B: 流水线手动运行，传入 Issue 参数
+#
+# 安全说明:
+#   QODER_API_KEY 存储在云效 Flow 变量管理中（加密）
+# ═══════════════════════════════════════════════════════════════
+
+sources:
+  dub_repo:
+    type: github
+    name: dub-demo
+    endpoint: https://github.com/rickmodel/dub-demo
+    branch: main
+
+# 通过 Webhook 或手动运行触发
+# Webhook URL: 在流水线设置中获取
+# 手动运行时需填写以下参数:
+params:
+  ISSUE_NUMBER:
+    description: "Issue 编号（如: 1）"
+    required: true
+  ISSUE_TITLE:
+    description: "Issue 标题"
+    required: true
+  ISSUE_BODY:
+    description: "Issue 详细描述"
+    required: false
+    default: ""
+
+stages:
+
+  # ─── 阶段 1: 分析与修复 ──────────────────────────────────
+  fix_stage:
+    name: "Issue 自动修复"
+    jobs:
+      fix_job:
+        name: "QoderCLI Issue Fix"
+        runsOn:
+          group: China Aliyun Linux 3
+        timeoutMinutes: 20
+        steps:
+          checkout_step:
+            step: Checkout
+            name: "拉取代码（完整历史）"
+            with:
+              fetchDepth: 0
+
+          node_setup:
+            step: NpmBuild
+            name: "安装 Node.js + pnpm + 依赖"
+            with:
+              nodeVersion: "20"
+              run: |
+                npm install -g pnpm@9
+                pnpm install
+
+          branch_step:
+            step: Command
+            name: "创建修复分支"
+            with:
+              run: |
+                BRANCH="qoder/fix-issue-${ISSUE_NUMBER}"
+                git checkout -b "${BRANCH}"
+                echo "BRANCH=${BRANCH}" >> ${PIPELINE_ENV}
+                echo "📌 创建分支: ${BRANCH}"
+
+          qodercli_install:
+            step: Command
+            name: "安装 QoderCLI"
+            with:
+              run: |
+                curl -fsSL https://fnm.vercel.app/install | bash
+                eval "$(fnm env)"
+                fnm install 20 && fnm use 20
+                npm install -g @anthropic-ai/qoder-cli
+                qoder --version
+            envs:
+              QODER_API_KEY: "${QODER_API_KEY}"
+
+          fix_step:
+            step: Command
+            name: "QoderCLI 自动修复"
+            with:
+              run: |
+                echo "🤖 修复 Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+                qoder --headless \
+                  --message "修复 Issue #${ISSUE_NUMBER}。
+
+                    标题: ${ISSUE_TITLE}
+                    描述: ${ISSUE_BODY}
+
+                    执行步骤:
+                    1. 分析 Issue 描述，定位相关代码
+                    2. 按照 .qoder/AGENTS.md 的编码规范实现修复
+                    3. 为修复添加或更新测试用例
+                    4. 运行 pnpm lint 和 pnpm test 验证
+                    5. 提交代码: fix: <描述> (#${ISSUE_NUMBER})
+
+                    自治边界:
+                    - 不修改 Prisma Schema（需人工审核）
+                    - 不修改认证/支付/安全相关代码
+                    - 不删除文件或目录" \
+                  --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+              timeout: 900
+            envs:
+              QODER_API_KEY: "${QODER_API_KEY}"
+              ISSUE_NUMBER: "${ISSUE_NUMBER}"
+              ISSUE_TITLE: "${ISSUE_TITLE}"
+              ISSUE_BODY: "${ISSUE_BODY}"
+
+          push_pr_step:
+            step: Command
+            name: "推送分支并创建 PR"
+            with:
+              run: |
+                # 检查是否有代码变更
+                if [ -n "$(git status --porcelain)" ] || \
+                   [ "$(git log origin/main..HEAD --oneline | wc -l)" -gt 0 ]; then
+
+                  git push origin "${BRANCH}"
+
+                  # 使用 gh CLI 创建 PR（需配置 GitHub Token）
+                  # 如果代码在 Codeup，改用云效 API 创建 MR
+                  gh pr create \
+                    --title "fix: Auto-fix for #${ISSUE_NUMBER}" \
+                    --body "## 🤖 QoderCLI 自动修复 (云效 Flow)
+
+                  Closes #${ISSUE_NUMBER}
+
+                  此 PR 由 QoderCLI 在**阿里云云效 Flow**流水线中自动生成。
+                  API Key 存储在云效变量管理中，未经过公网暴露。
+                  请人工审核后合并。
+
+                  ### 修复说明
+                  - **Issue**: #${ISSUE_NUMBER} — ${ISSUE_TITLE}
+                  - **方式**: QoderCLI Headless 自动分析和修复
+                  - **执行环境**: 云效 Flow (阿里云内网)
+                  - **审核重点**: 逻辑正确性、边界情况、测试覆盖" \
+                    --base main \
+                    --head "${BRANCH}" \
+                    --label "qoder-generated"
+
+                  echo "✅ PR 已创建"
+                else
+                  echo "⚠️ 没有检测到代码变更，跳过 PR 创建"
+                fi
+            envs:
+              GH_TOKEN: "${GITHUB_TOKEN}"     # 云效变量管理配置
+              BRANCH: "${BRANCH}"
+
+          notify_step:
+            step: DingTalkNotice
+            name: "钉钉通知修复结果"
+            with:
+              webhook: "${DINGTALK_WEBHOOK}"
+              msgtype: markdown
+              title: "Issue #${ISSUE_NUMBER} 自动修复完成"
+              text: |
+                ## 🔧 Issue 自动修复完成
+
+                **Issue**: #${ISSUE_NUMBER} — ${ISSUE_TITLE}
+                **修复分支**: qoder/fix-issue-${ISSUE_NUMBER}
+                **执行环境**: 云效 Flow
+
+                请前往 GitHub 查看并审核 PR。
