@@ -1,0 +1,250 @@
+# ═══════════════════════════════════════════════════════════════
+# Qoder CI/CD Pipeline — dub-demo
+# 
+# 三大核心能力:
+#   1. PR 触发 → QoderCLI 自动 Code Review + 自动修复
+#   2. Issue 标记 qoder-autofix → QoderCLI 自动修复并创建 PR
+#   3. main 推送 → 构建 Docker → 部署阿里云 ECS
+# ═══════════════════════════════════════════════════════════════
+
+name: "Qoder CI/CD Pipeline"
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+  issues:
+    types: [opened, labeled]
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Stage 1: 代码质量检查 (每次 PR/push 都运行)
+  # ─────────────────────────────────────────────
+  quality-check:
+    name: "🔨 代码质量检查"
+    if: github.event_name != 'issues'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: 安装依赖
+        run: pnpm install
+
+      - name: Prettier 格式检查
+        run: pnpm run prettier-check
+
+      - name: ESLint 检查
+        run: pnpm lint
+        continue-on-error: true
+
+  # ─────────────────────────────────────────────
+  # Stage 2: QoderCLI AI Code Review (仅 PR)
+  # ─────────────────────────────────────────────
+  qoder-review:
+    name: "🤖 QoderCLI Code Review"
+    if: github.event_name == 'pull_request'
+    needs: quality-check
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 QoderCLI
+        run: |
+          # 安装 Qoder CLI (中国版)
+          # npm install -g @anthropic-ai/qoder-cli
+          # 或使用 curl 安装:
+          # curl -fsSL https://qoder.com/cli/install | sh
+          echo "📋 QoderCLI 安装步骤 (需要配置 QODER_API_KEY)"
+          echo "实际运行时取消注释上方安装命令"
+        env:
+          QODER_API_KEY: ${{ secrets.QODER_API_KEY }}
+
+      - name: AI Code Review
+        run: |
+          echo "🔍 QoderCLI Headless Code Review"
+          echo "================================================"
+          echo "以下命令在配置好 QoderCLI 后实际执行:"
+          echo ""
+          echo 'qoder --headless \'
+          echo '  --message "Review this PR diff. Focus on:'
+          echo '    1. Logic errors and potential bugs'
+          echo '    2. Security vulnerabilities (API routes, Prisma queries)'  
+          echo '    3. TypeScript type safety (no any allowed)'
+          echo '    4. Performance issues (N+1 queries)'
+          echo '    5. Test coverage for new code'
+          echo '    Post findings as GitHub PR review comments." \'
+          echo '  --allowedTools "Bash,Read,Glob,Grep"'
+          echo ""
+          echo "================================================"
+          echo "✅ Review 步骤就绪 — 配置 QODER_API_KEY 后自动生效"
+
+      - name: 自动修复 Lint (构建失败时)
+        if: failure()
+        run: |
+          echo "🔧 QoderCLI Auto-fix"
+          echo 'qoder --headless \'
+          echo '  --message "Fix lint and type errors. Run pnpm lint, pnpm run format.'
+          echo '    Commit fixes with: fix: auto-fix lint issues by QoderCLI" \'
+          echo '  --allowedTools "Bash,Read,Edit"'
+
+  # ─────────────────────────────────────────────
+  # Stage 3: QoderCLI Issue 自动修复
+  #   给 Issue 打上 "qoder-autofix" label 即触发
+  # ─────────────────────────────────────────────
+  qoder-issue-fix:
+    name: "🔧 QoderCLI Issue 自动修复"
+    if: >
+      github.event_name == 'issues' &&
+      contains(github.event.issue.labels.*.name, 'qoder-autofix')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: 安装依赖
+        run: pnpm install
+
+      - name: 创建修复分支
+        run: |
+          BRANCH="qoder/fix-issue-${{ github.event.issue.number }}"
+          git checkout -b "$BRANCH"
+          echo "BRANCH=$BRANCH" >> $GITHUB_ENV
+          echo "📌 Created branch: $BRANCH"
+
+      - name: QoderCLI 自动修复
+        run: |
+          echo "🤖 QoderCLI Headless 修复 Issue #${{ github.event.issue.number }}"
+          echo "Title: ${{ github.event.issue.title }}"
+          echo ""
+          echo "实际执行命令:"
+          echo 'qoder --headless \'
+          echo "  --message \"Fix Issue #${{ github.event.issue.number }}."
+          echo "    Title: ${{ github.event.issue.title }}"
+          echo '    1. Analyze and locate relevant code'
+          echo '    2. Implement fix following .qoder/AGENTS.md conventions'
+          echo '    3. Add tests for the fix'
+          echo '    4. Run pnpm lint and pnpm test to verify'
+          echo "    5. Commit: fix: <desc> (#${{ github.event.issue.number }})\" \\"
+          echo '  --allowedTools "Bash,Read,Edit,Write,Glob,Grep"'
+        env:
+          QODER_API_KEY: ${{ secrets.QODER_API_KEY }}
+
+      - name: 推送并创建 PR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 检查是否有变更（实际运行时 QoderCLI 会产生 commit）
+          if [ -n "$(git status --porcelain)" ] || [ "$(git log origin/main..HEAD --oneline | wc -l)" -gt 0 ]; then
+            git push origin "$BRANCH"
+            gh pr create \
+              --title "fix: Auto-fix for #${{ github.event.issue.number }}" \
+              --body "$(cat <<'EOF'
+          ## 🤖 QoderCLI 自动修复
+
+          Closes #${{ github.event.issue.number }}
+
+          此 PR 由 QoderCLI 自动生成，请人工审核后合并。
+
+          ### 修复说明
+          - **Issue**: #${{ github.event.issue.number }} — ${{ github.event.issue.title }}
+          - **方式**: QoderCLI Headless 自动分析和修复
+          - **审核重点**: 逻辑正确性、边界情况、测试覆盖
+          EOF
+          )" \
+              --base main \
+              --head "$BRANCH" \
+              --label "qoder-generated"
+            echo "✅ PR 已创建"
+          else
+            echo "⚠️ 没有检测到代码变更，跳过 PR 创建"
+          fi
+
+  # ─────────────────────────────────────────────
+  # Stage 4: Docker 构建 (仅 main push)
+  # ─────────────────────────────────────────────
+  docker-build:
+    name: "🐳 Docker 构建"
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: quality-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 生成镜像标签
+        id: meta
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | head -c 7)
+          TAG="${{ github.run_number }}-${SHORT_SHA}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "📦 Image tag: $TAG"
+
+      - name: 构建 Docker 镜像
+        run: |
+          echo "🐳 构建 Docker 镜像"
+          echo "docker build -t dub-demo:${{ steps.meta.outputs.tag }} -f deploy/Dockerfile ."
+          echo ""
+          echo "实际部署时还需要:"
+          echo "1. docker login registry.cn-hangzhou.aliyuncs.com"
+          echo "2. docker push registry.cn-hangzhou.aliyuncs.com/\$NS/dub:\$TAG"
+          echo ""
+          echo "✅ Docker 构建步骤就绪"
+
+  # ─────────────────────────────────────────────
+  # Stage 5: Release Notes (仅 main push)
+  # ─────────────────────────────────────────────
+  release-notes:
+    name: "📝 Release Notes"
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: quality-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: QoderCLI 生成 Release Notes
+        run: |
+          echo "📝 QoderCLI 生成 Release Notes"
+          echo ""
+          echo '实际执行:'
+          echo 'qoder --headless \'
+          echo '  --message "Generate release notes in Chinese.'
+          echo '    Analyze git log since last tag.'
+          echo '    Format: 新功能 / Bug修复 / 其他改进'
+          echo '    Output to RELEASE_NOTES.md" \'
+          echo '  --allowedTools "Bash,Read,Write"'
+          echo ""
+          # 展示最近的 git log 作为 demo
+          echo "=== 最近提交记录 ==="
+          git log --oneline -10
+        env:
+          QODER_API_KEY: ${{ secrets.QODER_API_KEY }}

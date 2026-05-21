@@ -1,0 +1,48 @@
+# docker-compose.yml — Dub Demo 部署
+# 目标: 阿里云 ECS + RDS + Redis
+
+version: "3.8"
+
+services:
+  web:
+    image: registry.cn-hangzhou.aliyuncs.com/${ACR_NAMESPACE:-dub-demo}/dub:${IMAGE_TAG:-latest}
+    container_name: dub-web
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=mysql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:3306/${DB_NAME}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@${REDIS_HOST}:6379
+      - NEXTAUTH_SECRET=${NEXTAUTH_SECRET}
+      - NEXTAUTH_URL=${APP_URL:-https://your-domain.com}
+      - NEXT_PUBLIC_APP_URL=${APP_URL:-https://your-domain.com}
+      - NODE_ENV=production
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start-period: 20s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  nginx:
+    image: nginx:alpine
+    container_name: dub-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      web:
+        condition: service_healthy
+    restart: unless-stopped
+
+# 使用说明:
+# 1. 复制 .env.example 到 .env 并填写配置
+# 2. docker login registry.cn-hangzhou.aliyuncs.com
+# 3. docker-compose pull && docker-compose up -d
